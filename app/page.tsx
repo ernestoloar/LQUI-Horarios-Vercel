@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { sections as rawSections } from "../data";
+import { sections as rawSections } from "./data";
 
 type Meeting = [string, string, string, string];
 type Section = {
