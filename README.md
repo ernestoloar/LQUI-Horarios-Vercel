@@ -4,7 +4,7 @@ Aplicación web para apoyar a la coordinación de la Licenciatura en Química de
 
 ## Configuración del ejercicio
 
-- Ciclo: `202620` (calendario 2026-B)
+- Ciclo: `20262asdf` (calendario 2026-B)
 - Centro: `D` (CUCEI)
 - Carrera: `LQUI`
 - El cupo disponible se presenta de manera informativa y no interviene en el cálculo de combinaciones.
