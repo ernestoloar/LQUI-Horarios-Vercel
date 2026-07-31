@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
-import { sections as rawSections } from "./data";
+import { sections as rawSections } from "../data";
 
 type Meeting = [string, string, string, string];
 type Section = {
@@ -9,488 +10,171 @@ type Section = {
   k: string;
   c: string;
   s: string;
-  r: number;
   u: number;
   a: number;
-  p: string;
   m: Meeting[];
   e: number;
 };
-
-type ScheduleOption = {
-  items: Section[];
-  equivalents: number;
-};
-
-type ScheduleType = "Matutino" | "Vespertino" | "Mixto";
-
-type ViabilityIssue = {
-  level: "error" | "warning";
-  title: string;
-  detail: string;
-  courses?: string[];
-};
-
-type SectionParticipation = {
-  course: string;
-  section: string;
-  nrc: string;
-  combinations: number;
-};
-
-type ScheduleAnalysis = {
-  courses: number;
-  sections: number;
-  unscheduled: number;
-  theoretical: number;
-  valid: number;
-  options: ScheduleOption[];
-  byType: Record<ScheduleType, ScheduleOption[]>;
-  representatives: Partial<Record<ScheduleType, ScheduleOption>>;
-  participation: {
-    never: SectionParticipation[];
-    single: SectionParticipation[];
-  };
-  issues: ViabilityIssue[];
-};
+type Schedule = { items: Section[]; equivalents: number };
+type Availability = "Cero" | "Pocas" | "Muchas";
 
 const sections = rawSections as unknown as Section[];
 const DAYS = ["L", "M", "I", "J", "V", "S"];
-const WEEKDAYS = ["L", "M", "I", "J", "V"];
 const DAY_NAMES: Record<string, string> = {
-  L: "Lunes",
-  M: "Martes",
-  I: "Miércoles",
-  J: "Jueves",
-  V: "Viernes",
-  S: "Sábado",
+  L: "Lunes", M: "Martes", I: "Miércoles", J: "Jueves", V: "Viernes", S: "Sábado",
 };
-const START_MINUTE = 7 * 60;
-const END_MINUTE = 21 * 60;
-const PX_PER_MINUTE = 0.72;
-const TYPE_LABEL: Record<ScheduleType, string> = {
-  Matutino: "matutina",
-  Vespertino: "vespertina",
-  Mixto: "mixta",
-};
+const START = 7 * 60;
+const END = 21 * 60;
+const SCALE = 0.37;
+const PAGE_SIZE = 6;
 
-function min(time: string) {
+function minutes(time: string) {
   return Number(time.slice(0, 2)) * 60 + Number(time.slice(2));
 }
 
-function displayTime(time: string) {
+function timeLabel(time: string) {
   return `${time.slice(0, 2)}:${time.slice(2)}`;
 }
 
-function meetingsConflict(a: Meeting[], b: Meeting[]) {
-  return a.some(([dayA, startA, endA]) =>
-    b.some(
-      ([dayB, startB, endB]) =>
-        dayA === dayB && min(startA) < min(endB) && min(startB) < min(endA),
+function conflicts(left: Meeting[], right: Meeting[]) {
+  return left.some(([leftDay, leftStart, leftEnd]) =>
+    right.some(([rightDay, rightStart, rightEnd]) =>
+      leftDay === rightDay && minutes(leftStart) < minutes(rightEnd) && minutes(rightStart) < minutes(leftEnd),
     ),
   );
 }
 
-function buildScheduleAnalysis(pool: Section[]): ScheduleAnalysis {
-  const keys = [...new Set(pool.map((section) => section.k))];
-  const courseName = new Map(pool.map((section) => [section.k, section.c]));
-  const groupsByKey = new Map(
-    keys.map((key) => [key, pool.filter((section) => section.k === key && section.m.length > 0)]),
-  );
-  const unscheduledKeys = keys.filter((key) => !groupsByKey.get(key)?.length);
-  const groups = keys.map((key) => groupsByKey.get(key) || []).sort((a, b) => a.length - b.length);
-  const chosen: Section[] = [];
-  const visualOptions = new Map<string, ScheduleOption>();
-  const participationCount = new Map<string, number>();
-  let valid = 0;
+function signature(items: Section[]) {
+  return items
+    .map((section) => `${section.k}:${section.m.map(([day, start, end]) => `${day}-${start}-${end}`).sort().join(",")}`)
+    .sort()
+    .join("|");
+}
 
-  const emptyTypes: Record<ScheduleType, ScheduleOption[]> = {
-    Matutino: [],
-    Vespertino: [],
-    Mixto: [],
-  };
+function buildAnchoredSchedules(pool: Section[], anchorNrc: string) {
+  const courseKeys = [...new Set(pool.map((section) => section.k))];
+  const anchor = pool.find((section) => section.n === anchorNrc);
+  const groups = courseKeys
+    .map((key) => {
+      const scheduled = pool.filter((section) => section.k === key && section.m.length);
+      return anchor && key === anchor.k ? scheduled.filter((section) => section.n === anchor.n) : scheduled;
+    })
+    .sort((a, b) => a.length - b.length);
+  if (groups.some((group) => !group.length)) return [] as Schedule[];
 
-  if (unscheduledKeys.length) {
-    return {
-      courses: keys.length,
-      sections: pool.length,
-      unscheduled: pool.filter((section) => section.m.length === 0).length,
-      theoretical: 0,
-      valid: 0,
-      options: [],
-      byType: emptyTypes,
-      representatives: {},
-      participation: { never: [], single: [] },
-      issues: [{
-        level: "error",
-        title: "Materias sin horario capturado",
-        detail: "No es posible formar un horario completo hasta asignar día y hora a estas materias.",
-        courses: unscheduledKeys.map((key) => courseName.get(key) || key),
-      }],
-    };
-  }
-
+  const selected: Section[] = [];
+  const unique = new Map<string, Schedule>();
   function visit(index: number) {
     if (index === groups.length) {
-      valid += 1;
-      chosen.forEach((section) => {
-        participationCount.set(section.n, (participationCount.get(section.n) || 0) + 1);
-      });
-      const signature = chosen
-        .map((section) =>
-          `${section.k}:${section.m
-            .map(([day, start, end]) => `${day}-${start}-${end}`)
-            .sort()
-            .join(",")}`,
-        )
-        .sort()
-        .join("|");
-      const existing = visualOptions.get(signature);
+      const key = signature(selected);
+      const existing = unique.get(key);
       if (existing) existing.equivalents += 1;
-      else visualOptions.set(signature, { items: [...chosen], equivalents: 1 });
+      else unique.set(key, { items: [...selected], equivalents: 1 });
       return;
     }
     for (const section of groups[index]) {
-      if (chosen.some((other) => meetingsConflict(section.m, other.m))) continue;
-      chosen.push(section);
+      if (selected.some((item) => conflicts(section.m, item.m))) continue;
+      selected.push(section);
       visit(index + 1);
-      chosen.pop();
+      selected.pop();
     }
   }
-
   visit(0);
-  const theoretical = groups.reduce((total, group) => total * group.length, 1);
-  const options = [...visualOptions.values()];
-  const byType: Record<ScheduleType, ScheduleOption[]> = {
-    Matutino: [],
-    Vespertino: [],
-    Mixto: [],
-  };
-  options.forEach((option) => byType[scheduleMetrics(option).shift].push(option));
-  const rank = (a: ScheduleOption, b: ScheduleOption) => {
-    const aa = scheduleMetrics(a);
-    const bb = scheduleMetrics(b);
-    return aa.idleMinutes - bb.idleMinutes || (aa.last - aa.first) - (bb.last - bb.first) || aa.first - bb.first;
-  };
-  (Object.keys(byType) as ScheduleType[]).forEach((type) => byType[type].sort(rank));
-  const representatives: Partial<Record<ScheduleType, ScheduleOption>> = {};
-  (Object.keys(byType) as ScheduleType[]).forEach((type) => {
-    if (byType[type][0]) representatives[type] = byType[type][0];
-  });
-
-  const scheduledSections = pool.filter((section) => section.m.length > 0);
-  const participation = {
-    never: scheduledSections
-      .filter((section) => !participationCount.get(section.n))
-      .map((section) => ({
-        course: section.c,
-        section: section.s,
-        nrc: section.n,
-        combinations: 0,
-      })),
-    single: scheduledSections
-      .filter((section) => participationCount.get(section.n) === 1)
-      .map((section) => ({
-        course: section.c,
-        section: section.s,
-        nrc: section.n,
-        combinations: 1,
-      })),
-  };
-
-  const issues: ViabilityIssue[] = [];
-  if (!valid) {
-    const unavoidablePairs: string[] = [];
-    for (let i = 0; i < groups.length; i += 1) {
-      for (let j = i + 1; j < groups.length; j += 1) {
-        const alwaysConflict = groups[i].every((left) => groups[j].every((right) => meetingsConflict(left.m, right.m)));
-        if (alwaysConflict) unavoidablePairs.push(`${groups[i][0].c} ↔ ${groups[j][0].c}`);
-      }
-    }
-    issues.push({
-      level: "error",
-      title: "No existe un horario completo sin traslapes",
-      detail: unavoidablePairs.length
-        ? "Se detectaron pares de materias cuyas secciones se cruzan en todos los casos."
-        : "Las combinaciones parciales generan una cadena de cruces que impide integrar todas las materias.",
-      courses: unavoidablePairs.slice(0, 8),
-    });
-  } else {
-    if (participation.never.length) {
-      issues.push({
-        level: "error",
-        title: "Materias con secciones fuera de toda combinación",
-        detail: "Las secciones indicadas tienen horario capturado, pero siempre generan al menos un traslape al intentar completar el semestre.",
-        courses: participation.never.map(
-          (item) => `${item.course} — ${item.section} · NRC ${item.nrc}`,
-        ),
-      });
-    }
-    if (participation.single.length) {
-      issues.push({
-        level: "warning",
-        title: "Materias con secciones que solo entran en una combinación",
-        detail: "Las secciones indicadas dependen de una única combinación completa; cualquier cambio puede volverlas inviables.",
-        courses: participation.single.map(
-          (item) => `${item.course} — ${item.section} · NRC ${item.nrc}`,
-        ),
-      });
-    }
-
-    const availableTypeNames = (Object.keys(byType) as ScheduleType[]).filter(
-      (type) => byType[type].length,
-    );
-    if (availableTypeNames.length === 1) {
-      issues.push({
-        level: "warning",
-        title: `Oferta limitada a horario ${TYPE_LABEL[availableTypeNames[0]]}`,
-        detail: `El semestre completo únicamente puede construirse como opción ${TYPE_LABEL[availableTypeNames[0]]}; no existen alternativas viables en los otros dos tipos de turno.`,
-      });
-    } else {
-      (Object.keys(byType) as ScheduleType[]).forEach((type) => {
-        if (!byType[type].length) {
-          issues.push({
-            level: "warning",
-            title: `Sin opción ${TYPE_LABEL[type]}`,
-            detail: `Todas las materias sí caben en al menos un horario, pero no puede construirse una alternativa completamente ${TYPE_LABEL[type]}.`,
-          });
-        }
-      });
-    }
-  }
-  return {
-    courses: keys.length,
-    sections: pool.length,
-    unscheduled: pool.filter((section) => section.m.length === 0).length,
-    theoretical,
-    valid,
-    options,
-    byType,
-    representatives,
-    participation,
-    issues,
-  };
+  return [...unique.values()];
 }
 
-function scheduleMetrics(option: ScheduleOption) {
-  const meetings = option.items.flatMap((section) =>
-    section.m.map((meeting) => ({ section, meeting })),
+function classify(count: number): Availability {
+  if (!count) return "Cero";
+  if (count <= 2) return "Pocas";
+  return "Muchas";
+}
+
+function MiniCalendar({ schedule, index }: { schedule: Schedule; index: number }) {
+  const colors = new Map(
+    [...schedule.items].sort((a, b) => a.c.localeCompare(b.c)).map((section, itemIndex) => [section.k, itemIndex % 9]),
   );
-  const minutes = meetings.map(({ meeting }) => min(meeting[1]));
-  const ends = meetings.map(({ meeting }) => min(meeting[2]));
-  const daysUsed = new Set(meetings.map(({ meeting }) => meeting[0]));
-  const idleMinutes = DAYS.reduce((total, day) => {
-    const dayMeetings = meetings.filter(({ meeting }) => meeting[0] === day);
-    if (dayMeetings.length < 2) return total;
-    const first = Math.min(...dayMeetings.map(({ meeting }) => min(meeting[1])));
-    const last = Math.max(...dayMeetings.map(({ meeting }) => min(meeting[2])));
-    const classMinutes = dayMeetings.reduce(
-      (sum, { meeting }) => sum + min(meeting[2]) - min(meeting[1]),
-      0,
-    );
-    return total + Math.max(0, last - first - classMinutes);
-  }, 0);
-  return {
-    first: Math.min(...minutes),
-    last: Math.max(...ends),
-    idleMinutes,
-    daysUsed,
-    freeWeekdays: WEEKDAYS.filter((day) => !daysUsed.has(day)),
-    hasSaturday: daysUsed.has("S"),
-    shift: (Math.max(...ends) <= 15 * 60
-      ? "Matutino"
-      : Math.min(...minutes) >= 13 * 60
-        ? "Vespertino"
-        : "Mixto") as ScheduleType,
-  };
-}
-
-function minutesLabel(value: number) {
-  const hours = Math.floor(value / 60);
-  const minutes = value % 60;
-  return minutes ? `${hours} h ${minutes} min` : `${hours} h`;
-}
-
-function clockLabel(value: number) {
-  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
-}
-
-function Calendar({ option, type }: { option: ScheduleOption; type: ScheduleType }) {
-  const metrics = scheduleMetrics(option);
-  const colorByCourse = new Map(
-    [...option.items]
-      .sort((a, b) => a.c.localeCompare(b.c))
-      .map((section, index) => [section.k, index % 9]),
-  );
-  const hours = Array.from(
-    { length: (END_MINUTE - START_MINUTE) / 60 + 1 },
-    (_, index) => START_MINUTE + index * 60,
-  );
-  const calendarHeight = (END_MINUTE - START_MINUTE) * PX_PER_MINUTE;
-
+  const height = (END - START) * SCALE;
   return (
-    <section className="calendar-card" aria-label="Horario semanal seleccionado">
-      <div className="calendar-heading">
-        <div>
-          <span className="eyebrow">OPCIÓN MÍNIMA REPRESENTATIVA</span>
-          <h2>Opción {TYPE_LABEL[type]}</h2>
-        </div>
-        <div className="schedule-tags">
-          <span className="tag success">Sin traslapes</span>
-          <span className="tag">{metrics.shift}</span>
-          {metrics.hasSaturday && <span className="tag warning">Incluye sábado</span>}
-        </div>
+    <article className="generated-schedule">
+      <div className="generated-schedule-head">
+        <div><span>OPCIÓN {index}</span><strong>{schedule.items.length} materias sin traslapes</strong></div>
+        {schedule.equivalents > 1 && <small>{schedule.equivalents} combinaciones equivalentes</small>}
       </div>
-
-      <div className="calendar-scroll">
-        <div className="calendar-grid" style={{ minWidth: 980 }}>
-          <div className="calendar-corner">Hora</div>
+      <div className="mini-week-scroll">
+        <div className="mini-week">
+          {DAYS.map((day) => <strong className="mini-day-head" key={day}>{DAY_NAMES[day].slice(0, 3)}</strong>)}
           {DAYS.map((day) => (
-            <div className="calendar-day-head" key={day}>
-              <strong>{DAY_NAMES[day]}</strong>
-              <span>{metrics.daysUsed.has(day) ? "Con clases" : "Día libre"}</span>
-            </div>
-          ))}
-          <div className="time-rail" style={{ height: calendarHeight }}>
-            {hours.slice(0, -1).map((hour) => (
-              <span key={hour} style={{ top: (hour - START_MINUTE) * PX_PER_MINUTE - 7 }}>
-                {clockLabel(hour)}
-              </span>
-            ))}
-          </div>
-          {DAYS.map((day) => (
-            <div className={`day-lane ${metrics.daysUsed.has(day) ? "" : "is-free"}`} key={day} style={{ height: calendarHeight }}>
-              {hours.slice(0, -1).map((hour) => (
-                <i className="hour-line" key={hour} style={{ top: (hour - START_MINUTE) * PX_PER_MINUTE }} />
-              ))}
-              {!metrics.daysUsed.has(day) && <span className="free-day-label">Sin clases</span>}
-              {option.items.flatMap((section) =>
-                section.m
-                  .filter((meeting) => meeting[0] === day)
-                  .map((meeting, index) => {
-                    const start = min(meeting[1]);
-                    const end = min(meeting[2]);
-                    return (
-                      <article
-                        className={`calendar-class tone-${colorByCourse.get(section.k)}`}
-                        key={`${section.n}-${day}-${index}`}
-                        style={{
-                          top: (start - START_MINUTE) * PX_PER_MINUTE + 2,
-                          height: Math.max(35, (end - start) * PX_PER_MINUTE - 4),
-                        }}
-                        title={`${section.c} · ${section.s} · NRC ${section.n} · ${section.a} lugares disponibles`}
-                      >
-                        <time>{displayTime(meeting[1])}–{displayTime(meeting[2])}</time>
-                        <strong>{section.c}</strong>
-                        <span>{section.s} · {meeting[3]}</span>
-                        <small>Cupo {section.a}/{section.u}</small>
-                      </article>
-                    );
-                  }),
-              )}
+            <div className="mini-day" key={day} style={{ height }}>
+              {schedule.items.flatMap((section) => section.m.filter((meeting) => meeting[0] === day).map((meeting, meetingIndex) => {
+                const start = minutes(meeting[1]);
+                const end = minutes(meeting[2]);
+                return (
+                  <div
+                    className={`mini-class tone-${colors.get(section.k)}`}
+                    key={`${section.n}-${meetingIndex}`}
+                    style={{ top: (start - START) * SCALE, height: Math.max(29, (end - start) * SCALE - 2) }}
+                    title={`${section.c} · ${section.s} · NRC ${section.n}`}
+                  >
+                    <b>{timeLabel(meeting[1])}–{timeLabel(meeting[2])}</b>
+                    <span>{section.c}</span>
+                    <small>{section.s}</small>
+                  </div>
+                );
+              }))}
             </div>
           ))}
         </div>
       </div>
-    </section>
+    </article>
   );
 }
 
-export default function Home() {
-  const [mode, setMode] = useState<"viewer" | "simulator">("viewer");
+export default function ScheduleGenerator() {
   const [semester, setSemester] = useState(1);
-  const [scheduleType, setScheduleType] = useState<ScheduleType>("Matutino");
-  const analyses = useMemo(
-    () =>
-      Array.from({ length: 9 }, (_, index) => {
-        const currentSemester = index + 1;
-        return buildScheduleAnalysis(sections.filter((section) => section.e === currentSemester));
-      }),
-    [],
-  );
-  const analysis = analyses[semester - 1];
-  const neverCourseCount = new Set(analysis.participation.never.map((item) => item.course)).size;
-  const singleCourseCount = new Set(analysis.participation.single.map((item) => item.course)).size;
-  const availableTypes = (["Matutino", "Vespertino", "Mixto"] as ScheduleType[]).filter((type) => analysis.representatives[type]);
-  const activeType = analysis.representatives[scheduleType] ? scheduleType : availableTypes[0] || scheduleType;
-  const selectedOption = analysis.representatives[activeType];
-  const selectedMetrics = selectedOption ? scheduleMetrics(selectedOption) : null;
+  const pool = useMemo(() => sections.filter((section) => section.e === semester), [semester]);
+  const courses = useMemo(() => {
+    const unique = new Map<string, string>();
+    pool.forEach((section) => unique.set(section.k, section.c));
+    return [...unique.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [pool]);
+  const [courseKey, setCourseKey] = useState(() => sections.find((section) => section.e === 1)?.k || "");
+  const courseSections = pool.filter((section) => section.k === courseKey && section.m.length);
+  const [anchorNrc, setAnchorNrc] = useState("");
+  const [page, setPage] = useState(1);
+  const anchor = pool.find((section) => section.n === anchorNrc);
+  const schedules = useMemo(() => buildAnchoredSchedules(pool, anchorNrc), [pool, anchorNrc]);
+  const pageCount = Math.max(1, Math.ceil(schedules.length / PAGE_SIZE));
+  const visibleSchedules = schedules.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
-  const [simSemester, setSimSemester] = useState(1);
-  const simPool = useMemo(() => sections.filter((section) => section.e === simSemester), [simSemester]);
-  const [selectedNrc, setSelectedNrc] = useState(sections.find((section) => section.e === 1 && section.m.length)?.n || "");
-  const selectedSection = simPool.find((section) => section.n === selectedNrc && section.m.length) || simPool.find((section) => section.m.length);
-  const [meetingIndex, setMeetingIndex] = useState(0);
-  const baseMeeting = selectedSection?.m[meetingIndex] || selectedSection?.m[0];
-  const [newDay, setNewDay] = useState(baseMeeting?.[0] || "L");
-  const [newStart, setNewStart] = useState(baseMeeting ? displayTime(baseMeeting[1]) : "08:00");
-  const [newEnd, setNewEnd] = useState(baseMeeting ? displayTime(baseMeeting[2]) : "09:55");
+  const compatibility = useMemo(() => courses.map(([key, name]) => {
+    const candidates = pool.filter((section) => section.k === key && section.m.length);
+    const compatible = anchor
+      ? key === anchor.k
+        ? candidates.filter((section) => section.n === anchor.n)
+        : candidates.filter((section) => !conflicts(anchor.m, section.m))
+      : candidates;
+    return { key, name, count: compatible.length, status: classify(compatible.length) };
+  }), [anchor, courses, pool]);
 
-  function chooseSemester(value: number) {
+  function changeSemester(value: number) {
+    const nextPool = sections.filter((section) => section.e === value);
+    const nextCourse = nextPool[0]?.k || "";
     setSemester(value);
-    const nextAnalysis = analyses[value - 1];
-    const nextType = (["Matutino", "Vespertino", "Mixto"] as ScheduleType[]).find((type) => nextAnalysis.representatives[type]);
-    if (nextType) setScheduleType(nextType);
+    setCourseKey(nextCourse);
+    setAnchorNrc("");
+    setPage(1);
   }
 
-  function updateSimSemester(value: number) {
-    const next = sections.find((section) => section.e === value && section.m.length);
-    setSimSemester(value);
-    setSelectedNrc(next?.n || "");
-    setMeetingIndex(0);
-    const meeting = next?.m[0];
-    if (meeting) {
-      setNewDay(meeting[0]);
-      setNewStart(displayTime(meeting[1]));
-      setNewEnd(displayTime(meeting[2]));
-    }
+  function changeCourse(value: string) {
+    setCourseKey(value);
+    setAnchorNrc("");
+    setPage(1);
   }
 
-  function updateSelectedSection(nrc: string) {
-    const next = simPool.find((section) => section.n === nrc);
-    setSelectedNrc(nrc);
-    setMeetingIndex(0);
-    const meeting = next?.m[0];
-    if (meeting) {
-      setNewDay(meeting[0]);
-      setNewStart(displayTime(meeting[1]));
-      setNewEnd(displayTime(meeting[2]));
-    }
+  function changeAnchor(value: string) {
+    setAnchorNrc(value);
+    setPage(1);
   }
-
-  function updateMeeting(index: number) {
-    const meeting = selectedSection?.m[index];
-    setMeetingIndex(index);
-    if (meeting) {
-      setNewDay(meeting[0]);
-      setNewStart(displayTime(meeting[1]));
-      setNewEnd(displayTime(meeting[2]));
-    }
-  }
-
-  const simulation = useMemo(() => {
-    const current = analyses[simSemester - 1].valid;
-    if (!selectedSection || !baseMeeting) return { current, proposed: current, conflicts: [] as Section[] };
-    const compactStart = newStart.replace(":", "");
-    const compactEnd = newEnd.replace(":", "");
-    if (min(compactStart) >= min(compactEnd)) return { current, proposed: current, conflicts: [] as Section[] };
-    const movedPool = simPool.map((section) => {
-      if (section.n !== selectedSection.n) return section;
-      return {
-        ...section,
-        m: section.m.map((meeting, index) =>
-          index === meetingIndex ? [newDay, compactStart, compactEnd, meeting[3]] as Meeting : meeting,
-        ),
-      };
-    });
-    const proposed = buildScheduleAnalysis(movedPool).valid;
-    const moved = movedPool.find((section) => section.n === selectedSection.n)!;
-    const conflicts = movedPool.filter(
-      (section) => section.k !== moved.k && section.m.length && meetingsConflict(moved.m, section.m),
-    );
-    return { current, proposed, conflicts };
-  }, [analyses, simSemester, simPool, selectedSection, baseMeeting, meetingIndex, newDay, newStart, newEnd]);
-  const delta = simulation.proposed - simulation.current;
 
   return (
     <main>
@@ -498,17 +182,17 @@ export default function Home() {
         <div className="brand-mark" aria-hidden="true">LQ</div>
         <div className="brand-copy"><strong>Licenciatura en Química</strong><span>Herramienta de planeación de horarios</span></div>
         <nav className="mode-switch" aria-label="Secciones principales">
-          <button className={mode === "viewer" ? "active" : ""} onClick={() => setMode("viewer")}>Visualizador</button>
-          <button className={mode === "simulator" ? "active" : ""} onClick={() => setMode("simulator")}>Simulador de cambios</button>
+          <Link href="/">Visualizador y simulador</Link>
+          <Link className="active" href="/generador">Generador de horario</Link>
         </nav>
       </header>
 
-      <div className="page-shell">
+      <div className="page-shell generator-shell">
         <section className="hero compact-hero">
           <div>
-            <span className="eyebrow">OFERTA ACADÉMICA LQUI</span>
-            <h1>{mode === "viewer" ? "Opciones viables por semestre" : "Simulador de cambios"}</h1>
-            <p>{mode === "viewer" ? "Verifica las alternativas mínimas matutina, vespertina y mixta, y localiza materias o cruces que impiden integrar un horario completo." : "Mueve provisionalmente un bloque y mide cuántas opciones compatibles se ganan o se pierden."}</p>
+            <span className="eyebrow">ANÁLISIS ALREDEDOR DE UNA MATERIA</span>
+            <h1>Generador de horario</h1>
+            <p>Selecciona una materia y uno de sus horarios ofertados para revisar qué tan flexible es el resto del semestre y recorrer todas las combinaciones completas que se alinean con ella.</p>
           </div>
           <div className="config-card" aria-label="Configuración de la consulta">
             <span><small>Ciclo</small><strong>202620 · 2026-B</strong></span>
@@ -517,135 +201,29 @@ export default function Home() {
           </div>
         </section>
 
-        {mode === "viewer" ? (
-          <>
-            <nav className="semester-tabs visual-tabs" aria-label="Elegir semestre">
-              {analyses.map((item, index) => (
-                <button className={semester === index + 1 ? "active" : ""} key={index} onClick={() => chooseSemester(index + 1)}>
-                  <span>{index + 1}º</span>
-                  <small>{item.valid ? `${Object.keys(item.representatives).length} ${Object.keys(item.representatives).length === 1 ? "opción" : "opciones"}` : "Revisar"}</small>
-                  {item.issues.some((issue) => issue.level === "error") && <i className="status-dot error" aria-label="Con errores" />}
-                </button>
-              ))}
-            </nav>
+        <section className="generator-controls panel">
+          <label><span>1. Semestre</span><select value={semester} onChange={(event) => changeSemester(Number(event.target.value))}>{Array.from({ length: 9 }, (_, index) => <option key={index} value={index + 1}>{index + 1}º semestre</option>)}</select></label>
+          <label><span>2. Materia ancla</span><select value={courseKey} onChange={(event) => changeCourse(event.target.value)}>{courses.map(([key, name]) => <option key={key} value={key}>{name}</option>)}</select></label>
+          <label><span>3. Sección y horario</span><select value={anchorNrc} onChange={(event) => changeAnchor(event.target.value)}><option value="">Todas las secciones de la materia</option>{courseSections.map((section) => <option key={section.n} value={section.n}>{section.s} · NRC {section.n} · {section.m.map((meeting) => `${DAY_NAMES[meeting[0]].slice(0, 3)} ${timeLabel(meeting[1])}–${timeLabel(meeting[2])}`).join(" / ")}</option>)}</select></label>
+        </section>
 
-            <section className="visual-summary">
-              <div className={analysis.valid ? "featured success-card" : "featured error-card"}>
-                <span>Viabilidad del semestre</span>
-                <strong>{analysis.valid ? "Viable" : "Con errores"}</strong>
-                <small>{analysis.valid ? "Todas las materias caben sin traslapes" : "No se puede integrar el horario completo"}</small>
-              </div>
-              <div><span>Opciones mínimas viables</span><strong>{Object.keys(analysis.representatives).length} de 3</strong><small>matutina, vespertina y mixta</small></div>
-              <div><span>Combinaciones de secciones</span><strong>{analysis.valid.toLocaleString("es-MX")}</strong><small>todas sin traslapes</small></div>
-              <div className={analysis.participation.never.length ? "constraint-summary danger" : "constraint-summary"}>
-                <span>Materias con limitantes</span>
-                <strong>{neverCourseCount + singleCourseCount}</strong>
-                <small>{neverCourseCount} fuera de combinaciones · {singleCourseCount} con opción única</small>
-              </div>
-            </section>
+        <section className="generator-summary">
+          <article className={schedules.length ? "available" : "blocked"}><span>Horarios completos compatibles</span><strong>{schedules.length.toLocaleString("es-MX")}</strong><small>{anchor ? `anclados a ${anchor.s} · NRC ${anchor.n}` : "considerando cualquier sección de la materia"}</small></article>
+          {(["Cero", "Pocas", "Muchas"] as Availability[]).map((status) => <article className={status.toLowerCase()} key={status}><span>{status} opciones</span><strong>{compatibility.filter((item) => item.status === status).length}</strong><small>{status === "Cero" ? "0 secciones compatibles" : status === "Pocas" ? "1–2 secciones compatibles" : "3 o más secciones compatibles"}</small></article>)}
+        </section>
 
-            <section className="constraint-overview" aria-label="Limitantes principales del semestre">
-              <article className={analysis.participation.never.length ? "critical" : "clear"}>
-                <span>Materias con secciones fuera de toda combinación</span>
-                <strong>{neverCourseCount}</strong>
-                <small>{analysis.participation.never.length} secciones que requieren revisión</small>
-              </article>
-              <article className={analysis.participation.single.length ? "fragile" : "clear"}>
-                <span>Materias con secciones en una sola combinación</span>
-                <strong>{singleCourseCount}</strong>
-                <small>{analysis.participation.single.length} secciones con viabilidad frágil</small>
-              </article>
-              <article className={availableTypes.length === 1 ? "fragile" : "clear"}>
-                <span>Tipos de horario disponibles</span>
-                <strong>{availableTypes.length} de 3</strong>
-                <small>{availableTypes.length ? availableTypes.join(" · ") : "ninguno"}</small>
-              </article>
-            </section>
+        <section className="availability-panel panel">
+          <div className="section-heading"><div><span className="eyebrow">MAPA DE FLEXIBILIDAD</span><h2>Opciones de las materias alrededor del ancla</h2></div><span className="step-tag">{compatibility.length} materias</span></div>
+          <div className="availability-grid">{compatibility.map((item) => <article className={item.status.toLowerCase()} key={item.key}><span>{item.name}</span><strong>{item.count}</strong><small>{item.key === courseKey ? "Materia ancla" : `${item.status} opciones`}</small></article>)}</div>
+        </section>
 
-            <section className="minimal-options" aria-label="Opciones mínimas de horario">
-              {(["Matutino", "Vespertino", "Mixto"] as ScheduleType[]).map((type) => {
-                const count = analysis.byType[type].length;
-                return (
-                  <button
-                    key={type}
-                    className={`${activeType === type && count ? "active" : ""} ${!count ? "unavailable" : ""}`}
-                    disabled={!count}
-                    onClick={() => setScheduleType(type)}
-                  >
-                    <span>{type}</span>
-                    <strong>{count ? "Opción viable" : "No disponible"}</strong>
-                    <small>{count ? `${count.toLocaleString("es-MX")} variantes compatibles` : "Consultar revisión de viabilidad"}</small>
-                  </button>
-                );
-              })}
-            </section>
-
-            {selectedMetrics && (
-              <section className="selected-option-summary">
-                <div><span>Jornada</span><strong>{clockLabel(selectedMetrics.first)}–{clockLabel(selectedMetrics.last)}</strong></div>
-                <div><span>Huecos acumulados</span><strong>{minutesLabel(selectedMetrics.idleMinutes)}</strong></div>
-                <div><span>Días utilizados</span><strong>{selectedMetrics.daysUsed.size}</strong></div>
-                <div><span>Sábado</span><strong>{selectedMetrics.hasSaturday ? "Con clases" : "Libre"}</strong></div>
-              </section>
-            )}
-
-            {selectedOption ? (
-              <>
-                <Calendar option={selectedOption} type={activeType} />
-                <p className="equivalent-note">Se muestra únicamente la alternativa más compacta de este tipo. Representa {analysis.byType[activeType].length.toLocaleString("es-MX")} variantes compatibles de secciones.</p>
-              </>
-            ) : (
-              <div className="empty-state"><strong>No hay un horario completo viable</strong><p>Revisa los hallazgos siguientes para identificar la materia o el cruce que debe corregirse.</p></div>
-            )}
-
-            <section className="viability-panel panel">
-              <div className="section-heading">
-                <div><span className="eyebrow">REVISIÓN DE VIABILIDAD</span><h2>Errores y observaciones</h2></div>
-                <span className={`review-count ${analysis.issues.some((issue) => issue.level === "error") ? "has-errors" : ""}`}>
-                  {analysis.issues.length ? `${analysis.issues.length} hallazgos` : "Sin errores"}
-                </span>
-              </div>
-              {analysis.issues.length ? (
-                <div className="issue-list">
-                  {analysis.issues.map((issue, index) => (
-                    <article className={`issue ${issue.level}`} key={`${issue.title}-${index}`}>
-                      <div className="issue-icon" aria-hidden="true">{issue.level === "error" ? "!" : "i"}</div>
-                      <div>
-                        <strong>{issue.title}</strong>
-                        <p>{issue.detail}</p>
-                        {issue.courses?.length ? <ul>{issue.courses.map((course) => <li key={course}>{course}</li>)}</ul> : null}
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <div className="all-clear"><strong>Todas las materias son viables</strong><p>Existe al menos una combinación completa sin traslapes y no hay materias sin horario capturado.</p></div>
-              )}
-            </section>
-          </>
-        ) : (
-          <section className="simulator-layout">
-            <div className="sim-form panel">
-              <div className="section-heading compact-heading"><div><span className="eyebrow">ESCENARIO PROPUESTO</span><h2>Mover una sección</h2></div><span className="step-tag">No modifica SIIAU</span></div>
-              <label><span>Semestre</span><select value={simSemester} onChange={(event) => updateSimSemester(Number(event.target.value))}>{analyses.map((_, index) => <option key={index} value={index + 1}>{index + 1}º semestre</option>)}</select></label>
-              <label><span>Sección</span><select value={selectedSection?.n || ""} onChange={(event) => updateSelectedSection(event.target.value)}>{simPool.filter((section) => section.m.length).map((section) => <option key={section.n} value={section.n}>{section.c} · {section.s} · NRC {section.n}</option>)}</select></label>
-              {selectedSection && selectedSection.m.length > 1 && <label><span>Bloque a modificar</span><select value={meetingIndex} onChange={(event) => updateMeeting(Number(event.target.value))}>{selectedSection.m.map((meeting, index) => <option key={index} value={index}>{DAY_NAMES[meeting[0]]} {displayTime(meeting[1])}–{displayTime(meeting[2])}</option>)}</select></label>}
-              <div className="current-slot"><span>Horario actual</span><strong>{baseMeeting ? `${DAY_NAMES[baseMeeting[0]]} ${displayTime(baseMeeting[1])}–${displayTime(baseMeeting[2])}` : "Sin horario"}</strong><small>{baseMeeting?.[3]}</small></div>
-              <fieldset><legend>Nuevo horario provisional</legend><label><span>Día</span><select value={newDay} onChange={(event) => setNewDay(event.target.value)}>{DAYS.map((day) => <option key={day} value={day}>{DAY_NAMES[day]}</option>)}</select></label><div className="time-fields"><label><span>Inicio</span><input type="time" value={newStart} onChange={(event) => setNewStart(event.target.value)} /></label><label><span>Fin</span><input type="time" value={newEnd} onChange={(event) => setNewEnd(event.target.value)} /></label></div></fieldset>
-              <p className="fine-print">El cupo es informativo y no modifica el cálculo. Solo se consideran secciones del centro D con horario capturado.</p>
-            </div>
-            <div className="sim-results">
-              <article className="comparison-card panel">
-                <div className="section-heading compact-heading"><div><span className="eyebrow">IMPACTO INMEDIATO</span><h2>Actual vs. simulado</h2></div><span className={`impact-badge ${delta < 0 ? "negative" : delta > 0 ? "positive" : "neutral"}`}>{delta > 0 ? "Cambio favorable" : delta < 0 ? "Cambio desfavorable" : "Cambio neutral"}</span></div>
-                <div className="comparison-numbers"><div><span>Actual</span><strong>{simulation.current.toLocaleString("es-MX")}</strong><small>combinaciones sin cruce</small></div><div className="arrow">→</div><div><span>Simulado</span><strong>{simulation.proposed.toLocaleString("es-MX")}</strong><small>combinaciones sin cruce</small></div><div className={`delta ${delta < 0 ? "negative" : delta > 0 ? "positive" : ""}`}><span>Diferencia</span><strong>{delta > 0 ? "+" : ""}{delta.toLocaleString("es-MX")}</strong><small>opciones</small></div></div>
-              </article>
-              <article className="affected-card panel">
-                <div className="section-heading compact-heading"><div><span className="eyebrow">CRUCES DIRECTOS</span><h2>Secciones que coinciden con el cambio</h2></div><strong>{simulation.conflicts.length}</strong></div>
-                {simulation.conflicts.length ? <div className="conflict-list">{simulation.conflicts.slice(0, 8).map((section) => <div key={section.n}><span>{section.c}</span><strong>{section.s} · NRC {section.n}</strong><small>{section.m.map((meeting) => `${DAY_NAMES[meeting[0]].slice(0, 3)} ${displayTime(meeting[1])}–${displayTime(meeting[2])}`).join(" · ")}</small></div>)}</div> : <div className="empty-state"><strong>Sin cruces directos</strong><p>El bloque propuesto no coincide con otras secciones del mismo semestre.</p></div>}
-              </article>
-            </div>
-          </section>
-        )}
+        <section className="generated-results">
+          <div className="section-heading">
+            <div><span className="eyebrow">HORARIOS VIABLES</span><h2>Todas las alternativas visuales</h2></div>
+            {schedules.length > PAGE_SIZE && <div className="generator-pagination"><button disabled={page === 1} onClick={() => setPage((value) => value - 1)}>←</button><span>Página {page} de {pageCount}</span><button disabled={page === pageCount} onClick={() => setPage((value) => value + 1)}>→</button></div>}
+          </div>
+          {visibleSchedules.length ? <div className="generated-grid">{visibleSchedules.map((schedule, index) => <MiniCalendar key={`${page}-${index}`} schedule={schedule} index={(page - 1) * PAGE_SIZE + index + 1} />)}</div> : <div className="empty-state blocked-state"><strong>No existe un horario completo con esta selección</strong><p>El mapa superior muestra las materias sin secciones compatibles. Puedes elegir otra sección de la materia ancla o probar el cambio en el simulador.</p></div>}
+        </section>
       </div>
       <footer>Datos de consulta SIIAU 202620 · Centro D · LQUI · Cupo únicamente informativo</footer>
     </main>
