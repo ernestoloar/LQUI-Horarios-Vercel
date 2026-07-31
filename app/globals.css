@@ -60,6 +60,18 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .visual-summary .featured strong { color: white; }
 .visual-summary .success-card { background: #116b50; border-color: #116b50; }
 .visual-summary .error-card { background: #9f2943; border-color: #9f2943; }
+.visual-summary .constraint-summary.danger { border-color: #e2a9b7; background: #fff7f9; }
+.visual-summary .constraint-summary.danger strong { color: #a83250; }
+.constraint-overview { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+.constraint-overview article { min-height: 92px; display: grid; grid-template-columns: 1fr auto; align-content: center; gap: 3px 14px; padding: 15px 17px; border: 1px solid var(--line); border-left-width: 5px; border-radius: 13px; background: white; }
+.constraint-overview span { color: var(--navy); font-size: 12px; font-weight: 800; }
+.constraint-overview strong { grid-row: 1 / span 2; grid-column: 2; align-self: center; color: var(--navy); font-size: 28px; }
+.constraint-overview small { color: var(--muted); font-size: 10px; }
+.constraint-overview article.clear { border-left-color: var(--green); }
+.constraint-overview article.fragile { border-color: #ead9a7; border-left-color: var(--amber); background: #fffaf0; }
+.constraint-overview article.fragile strong { color: #8a6100; }
+.constraint-overview article.critical { border-color: #f0c3ce; border-left-color: #b83250; background: #fff7f9; }
+.constraint-overview article.critical strong { color: #b83250; }
 .correction-note { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; padding: 11px 14px; border: 1px solid #c8e8df; border-radius: 11px; color: #17694e; background: #eef9f5; font-size: 12px; }
 
 .minimal-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
@@ -200,6 +212,7 @@ footer { padding: 24px; text-align: center; color: #7b899c; background: #e9edf1;
   .semester-tabs button { min-width: 68px; }
   .visual-summary { grid-template-columns: 1fr 1fr; }
   .minimal-options { grid-template-columns: 1fr; }
+  .constraint-overview { grid-template-columns: 1fr; }
   .selected-option-summary { grid-template-columns: 1fr 1fr; }
   .selected-option-summary div:nth-child(2) { border-right: 0; }
   .selected-option-summary div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
@@ -214,4 +227,3 @@ footer { padding: 24px; text-align: center; color: #7b899c; background: #e9edf1;
   .comparison-numbers .delta { grid-column: 1 / -1; }
   .conflict-list { grid-template-columns: 1fr; }
 }
-

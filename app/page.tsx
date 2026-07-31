@@ -31,6 +31,13 @@ type ViabilityIssue = {
   courses?: string[];
 };
 
+type SectionParticipation = {
+  course: string;
+  section: string;
+  nrc: string;
+  combinations: number;
+};
+
 type ScheduleAnalysis = {
   courses: number;
   sections: number;
@@ -40,6 +47,10 @@ type ScheduleAnalysis = {
   options: ScheduleOption[];
   byType: Record<ScheduleType, ScheduleOption[]>;
   representatives: Partial<Record<ScheduleType, ScheduleOption>>;
+  participation: {
+    never: SectionParticipation[];
+    single: SectionParticipation[];
+  };
   issues: ViabilityIssue[];
 };
 
@@ -90,6 +101,7 @@ function buildScheduleAnalysis(pool: Section[]): ScheduleAnalysis {
   const groups = keys.map((key) => groupsByKey.get(key) || []).sort((a, b) => a.length - b.length);
   const chosen: Section[] = [];
   const visualOptions = new Map<string, ScheduleOption>();
+  const participationCount = new Map<string, number>();
   let valid = 0;
 
   const emptyTypes: Record<ScheduleType, ScheduleOption[]> = {
@@ -108,6 +120,7 @@ function buildScheduleAnalysis(pool: Section[]): ScheduleAnalysis {
       options: [],
       byType: emptyTypes,
       representatives: {},
+      participation: { never: [], single: [] },
       issues: [{
         level: "error",
         title: "Materias sin horario capturado",
@@ -120,6 +133,9 @@ function buildScheduleAnalysis(pool: Section[]): ScheduleAnalysis {
   function visit(index: number) {
     if (index === groups.length) {
       valid += 1;
+      chosen.forEach((section) => {
+        participationCount.set(section.n, (participationCount.get(section.n) || 0) + 1);
+      });
       const signature = chosen
         .map((section) =>
           `${section.k}:${section.m
@@ -162,6 +178,26 @@ function buildScheduleAnalysis(pool: Section[]): ScheduleAnalysis {
     if (byType[type][0]) representatives[type] = byType[type][0];
   });
 
+  const scheduledSections = pool.filter((section) => section.m.length > 0);
+  const participation = {
+    never: scheduledSections
+      .filter((section) => !participationCount.get(section.n))
+      .map((section) => ({
+        course: section.c,
+        section: section.s,
+        nrc: section.n,
+        combinations: 0,
+      })),
+    single: scheduledSections
+      .filter((section) => participationCount.get(section.n) === 1)
+      .map((section) => ({
+        course: section.c,
+        section: section.s,
+        nrc: section.n,
+        combinations: 1,
+      })),
+  };
+
   const issues: ViabilityIssue[] = [];
   if (!valid) {
     const unavoidablePairs: string[] = [];
@@ -180,15 +216,47 @@ function buildScheduleAnalysis(pool: Section[]): ScheduleAnalysis {
       courses: unavoidablePairs.slice(0, 8),
     });
   } else {
-    (Object.keys(byType) as ScheduleType[]).forEach((type) => {
-      if (!byType[type].length) {
-        issues.push({
-          level: "warning",
-          title: `Sin opción ${TYPE_LABEL[type]}`,
-          detail: `Todas las materias sí caben en al menos un horario, pero no puede construirse una alternativa completamente ${TYPE_LABEL[type]}.`,
-        });
-      }
-    });
+    if (participation.never.length) {
+      issues.push({
+        level: "error",
+        title: "Materias con secciones fuera de toda combinación",
+        detail: "Las secciones indicadas tienen horario capturado, pero siempre generan al menos un traslape al intentar completar el semestre.",
+        courses: participation.never.map(
+          (item) => `${item.course} — ${item.section} · NRC ${item.nrc}`,
+        ),
+      });
+    }
+    if (participation.single.length) {
+      issues.push({
+        level: "warning",
+        title: "Materias con secciones que solo entran en una combinación",
+        detail: "Las secciones indicadas dependen de una única combinación completa; cualquier cambio puede volverlas inviables.",
+        courses: participation.single.map(
+          (item) => `${item.course} — ${item.section} · NRC ${item.nrc}`,
+        ),
+      });
+    }
+
+    const availableTypeNames = (Object.keys(byType) as ScheduleType[]).filter(
+      (type) => byType[type].length,
+    );
+    if (availableTypeNames.length === 1) {
+      issues.push({
+        level: "warning",
+        title: `Oferta limitada a horario ${TYPE_LABEL[availableTypeNames[0]]}`,
+        detail: `El semestre completo únicamente puede construirse como opción ${TYPE_LABEL[availableTypeNames[0]]}; no existen alternativas viables en los otros dos tipos de turno.`,
+      });
+    } else {
+      (Object.keys(byType) as ScheduleType[]).forEach((type) => {
+        if (!byType[type].length) {
+          issues.push({
+            level: "warning",
+            title: `Sin opción ${TYPE_LABEL[type]}`,
+            detail: `Todas las materias sí caben en al menos un horario, pero no puede construirse una alternativa completamente ${TYPE_LABEL[type]}.`,
+          });
+        }
+      });
+    }
   }
   return {
     courses: keys.length,
@@ -199,6 +267,7 @@ function buildScheduleAnalysis(pool: Section[]): ScheduleAnalysis {
     options,
     byType,
     representatives,
+    participation,
     issues,
   };
 }
@@ -340,6 +409,8 @@ export default function Home() {
     [],
   );
   const analysis = analyses[semester - 1];
+  const neverCourseCount = new Set(analysis.participation.never.map((item) => item.course)).size;
+  const singleCourseCount = new Set(analysis.participation.single.map((item) => item.course)).size;
   const availableTypes = (["Matutino", "Vespertino", "Mixto"] as ScheduleType[]).filter((type) => analysis.representatives[type]);
   const activeType = analysis.representatives[scheduleType] ? scheduleType : availableTypes[0] || scheduleType;
   const selectedOption = analysis.representatives[activeType];
@@ -466,7 +537,29 @@ export default function Home() {
               </div>
               <div><span>Opciones mínimas viables</span><strong>{Object.keys(analysis.representatives).length} de 3</strong><small>matutina, vespertina y mixta</small></div>
               <div><span>Combinaciones de secciones</span><strong>{analysis.valid.toLocaleString("es-MX")}</strong><small>todas sin traslapes</small></div>
-              <div><span>Materias verificadas</span><strong>{analysis.courses}</strong><small>según la malla del semestre</small></div>
+              <div className={analysis.participation.never.length ? "constraint-summary danger" : "constraint-summary"}>
+                <span>Materias con limitantes</span>
+                <strong>{neverCourseCount + singleCourseCount}</strong>
+                <small>{neverCourseCount} fuera de combinaciones · {singleCourseCount} con opción única</small>
+              </div>
+            </section>
+
+            <section className="constraint-overview" aria-label="Limitantes principales del semestre">
+              <article className={analysis.participation.never.length ? "critical" : "clear"}>
+                <span>Materias con secciones fuera de toda combinación</span>
+                <strong>{neverCourseCount}</strong>
+                <small>{analysis.participation.never.length} secciones que requieren revisión</small>
+              </article>
+              <article className={analysis.participation.single.length ? "fragile" : "clear"}>
+                <span>Materias con secciones en una sola combinación</span>
+                <strong>{singleCourseCount}</strong>
+                <small>{analysis.participation.single.length} secciones con viabilidad frágil</small>
+              </article>
+              <article className={availableTypes.length === 1 ? "fragile" : "clear"}>
+                <span>Tipos de horario disponibles</span>
+                <strong>{availableTypes.length} de 3</strong>
+                <small>{availableTypes.length ? availableTypes.join(" · ") : "ninguno"}</small>
+              </article>
             </section>
 
             <section className="minimal-options" aria-label="Opciones mínimas de horario">
@@ -558,4 +651,3 @@ export default function Home() {
     </main>
   );
 }
-
