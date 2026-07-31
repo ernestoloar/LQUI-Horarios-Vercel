@@ -425,7 +425,7 @@ export default function Home() {
     <main>
       <header className="topbar">
         <div className="brand-mark" aria-hidden="true">LQ</div>
-        <div className="brand-copy"><strong>Licenciatura en Química</strong><span>Herramienta de planeación de horarios 0000</span></div>
+        <div className="brand-copy"><strong>Licenciatura en Química</strong><span>Herramienta de planeación de horarios</span></div>
         <nav className="mode-switch" aria-label="Secciones principales">
           <button className={mode === "viewer" ? "active" : ""} onClick={() => setMode("viewer")}>Visualizador</button>
           <button className={mode === "simulator" ? "active" : ""} onClick={() => setMode("simulator")}>Simulador de cambios</button>
