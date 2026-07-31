@@ -182,7 +182,7 @@ export default function ScheduleGenerator() {
         <div className="brand-mark" aria-hidden="true">LQ</div>
         <div className="brand-copy"><strong>Licenciatura en Química</strong><span>Herramienta de planeación de horarios</span></div>
         <nav className="mode-switch" aria-label="Secciones principales">
-          <Link href="/">Visualizador y simulador</Link>
+          <Link href="/">Visualizador</Link>
           <Link className="active" href="/generador">Generador de horario</Link>
         </nav>
       </header>
@@ -222,7 +222,7 @@ export default function ScheduleGenerator() {
             <div><span className="eyebrow">HORARIOS VIABLES</span><h2>Todas las alternativas visuales</h2></div>
             {schedules.length > PAGE_SIZE && <div className="generator-pagination"><button disabled={page === 1} onClick={() => setPage((value) => value - 1)}>←</button><span>Página {page} de {pageCount}</span><button disabled={page === pageCount} onClick={() => setPage((value) => value + 1)}>→</button></div>}
           </div>
-          {visibleSchedules.length ? <div className="generated-grid">{visibleSchedules.map((schedule, index) => <MiniCalendar key={`${page}-${index}`} schedule={schedule} index={(page - 1) * PAGE_SIZE + index + 1} />)}</div> : <div className="empty-state blocked-state"><strong>No existe un horario completo con esta selección</strong><p>El mapa superior muestra las materias sin secciones compatibles. Puedes elegir otra sección de la materia ancla o probar el cambio en el simulador.</p></div>}
+          {visibleSchedules.length ? <div className="generated-grid">{visibleSchedules.map((schedule, index) => <MiniCalendar key={`${page}-${index}`} schedule={schedule} index={(page - 1) * PAGE_SIZE + index + 1} />)}</div> : <div className="empty-state blocked-state"><strong>No existe un horario completo con esta selección</strong><p>El mapa superior muestra las materias sin secciones compatibles. Puedes elegir otra sección de la materia ancla o consultar las recomendaciones de ajuste en el visualizador.</p></div>}
         </section>
       </div>
       <footer>Datos de consulta SIIAU 202620 · Centro D · LQUI · Cupo únicamente informativo</footer>

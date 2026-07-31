@@ -56,6 +56,28 @@ type ScheduleAnalysis = {
   issues: ViabilityIssue[];
 };
 
+type RecommendedChange = {
+  from: Meeting;
+  to: Meeting;
+};
+
+type ScheduleRecommendation = {
+  id: string;
+  section: Section;
+  kind: "block" | "section";
+  changes: RecommendedChange[];
+  newCombinations: number;
+  resultingTotal: number;
+  example: ScheduleOption;
+  dayPattern: string;
+  disruption: number;
+};
+
+type SectionRecommendation = {
+  section: Section;
+  suggestions: ScheduleRecommendation[];
+};
+
 const sections = rawSections as unknown as Section[];
 const DAYS = ["L", "M", "I", "J", "V", "S"];
 const WEEKDAYS = ["L", "M", "I", "J", "V"];
@@ -84,6 +106,10 @@ function displayTime(time: string) {
   return `${time.slice(0, 2)}:${time.slice(2)}`;
 }
 
+function compactTime(value: number) {
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}${String(value % 60).padStart(2, "0")}`;
+}
+
 function meetingsConflict(a: Meeting[], b: Meeting[]) {
   return a.some(([dayA, startA, endA]) =>
     b.some(
@@ -91,6 +117,123 @@ function meetingsConflict(a: Meeting[], b: Meeting[]) {
         dayA === dayB && min(startA) < min(endB) && min(startB) < min(endA),
     ),
   );
+}
+
+function evaluateTargetSchedule(pool: Section[], target: Section) {
+  const keys = [...new Set(pool.map((section) => section.k))].filter((key) => key !== target.k);
+  const groups = keys
+    .map((key) => pool.filter((section) => section.k === key && section.m.length > 0))
+    .sort((a, b) => a.length - b.length);
+  const chosen: Section[] = [target];
+  let combinations = 0;
+  let example: ScheduleOption | undefined;
+
+  function visit(index: number) {
+    if (index === groups.length) {
+      combinations += 1;
+      if (!example) example = { items: [...chosen], equivalents: 1 };
+      return;
+    }
+    for (const section of groups[index]) {
+      if (chosen.some((other) => meetingsConflict(section.m, other.m))) continue;
+      chosen.push(section);
+      visit(index + 1);
+      chosen.pop();
+    }
+  }
+
+  visit(0);
+  return { combinations, example };
+}
+
+function recommendationDisruption(original: Meeting[], proposed: Meeting[], changedBlocks: number) {
+  return proposed.reduce((score, meeting, index) => {
+    const current = original[index];
+    const dayDistance = Math.abs(DAYS.indexOf(meeting[0]) - DAYS.indexOf(current[0]));
+    const timeDistance = Math.abs(min(meeting[1]) - min(current[1])) / 60;
+    return score + dayDistance * 2 + timeDistance;
+  }, changedBlocks * 3);
+}
+
+function buildSectionRecommendations(
+  pool: Section[],
+  analysis: ScheduleAnalysis,
+): SectionRecommendation[] {
+  return analysis.participation.never.map((item) => {
+    const section = pool.find((candidate) => candidate.n === item.nrc)!;
+    if (!section.m.length) return { section, suggestions: [] };
+
+    const candidates = new Map<string, ScheduleRecommendation>();
+
+    function consider(proposedMeetings: Meeting[], kind: "block" | "section") {
+      const signature = proposedMeetings
+        .map(([day, start, end]) => `${day}-${start}-${end}`)
+        .join("|");
+      if (candidates.has(signature)) return;
+      const proposedSection = { ...section, m: proposedMeetings };
+      const result = evaluateTargetSchedule(pool, proposedSection);
+      if (!result.combinations || !result.example) return;
+      const changes = section.m
+        .map((from, index) => ({ from, to: proposedMeetings[index] }))
+        .filter(({ from, to }) => from[0] !== to[0] || from[1] !== to[1] || from[2] !== to[2]);
+      const recommendation: ScheduleRecommendation = {
+        id: `${section.n}-${signature}`,
+        section,
+        kind,
+        changes,
+        newCombinations: result.combinations,
+        resultingTotal: analysis.valid + result.combinations,
+        example: result.example,
+        dayPattern: proposedMeetings.map((meeting) => meeting[0]).join("-"),
+        disruption: recommendationDisruption(section.m, proposedMeetings, changes.length),
+      };
+      candidates.set(signature, recommendation);
+    }
+
+    section.m.forEach((meeting, meetingIndex) => {
+      const duration = min(meeting[2]) - min(meeting[1]);
+      DAYS.forEach((day) => {
+        for (let start = START_MINUTE; start + duration <= END_MINUTE; start += 60) {
+          if (day === meeting[0] && start === min(meeting[1])) continue;
+          const proposed = section.m.map((current, index) =>
+            index === meetingIndex
+              ? [day, compactTime(start), compactTime(start + duration), current[3]] as Meeting
+              : current,
+          );
+          consider(proposed, "block");
+        }
+      });
+    });
+
+    if (section.m.length > 1) {
+      for (let dayShift = -5; dayShift <= 5; dayShift += 1) {
+        for (let hourShift = -13; hourShift <= 13; hourShift += 1) {
+          if (!dayShift && !hourShift) continue;
+          const proposed = section.m.map((meeting) => {
+            const dayIndex = DAYS.indexOf(meeting[0]) + dayShift;
+            const start = min(meeting[1]) + hourShift * 60;
+            const end = min(meeting[2]) + hourShift * 60;
+            if (dayIndex < 0 || dayIndex >= DAYS.length || start < START_MINUTE || end > END_MINUTE) return null;
+            return [DAYS[dayIndex], compactTime(start), compactTime(end), meeting[3]] as Meeting;
+          });
+          if (proposed.every((meeting): meeting is Meeting => meeting !== null)) consider(proposed, "section");
+        }
+      }
+    }
+
+    const ranked = [...candidates.values()].sort(
+      (a, b) => b.newCombinations - a.newCombinations || a.disruption - b.disruption,
+    );
+    const suggestions: ScheduleRecommendation[] = [];
+    const usedPatterns = new Set<string>();
+    for (const recommendation of ranked) {
+      if (usedPatterns.has(recommendation.dayPattern)) continue;
+      suggestions.push(recommendation);
+      usedPatterns.add(recommendation.dayPattern);
+      if (suggestions.length === 3) break;
+    }
+    return { section, suggestions };
+  });
 }
 
 function buildScheduleAnalysis(pool: Section[]): ScheduleAnalysis {
@@ -323,7 +466,17 @@ function clockLabel(value: number) {
   return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
 }
 
-function Calendar({ option, type }: { option: ScheduleOption; type: ScheduleType }) {
+function Calendar({
+  option,
+  type,
+  eyebrow = "OPCIÓN MÍNIMA REPRESENTATIVA",
+  title,
+}: {
+  option: ScheduleOption;
+  type: ScheduleType;
+  eyebrow?: string;
+  title?: string;
+}) {
   const metrics = scheduleMetrics(option);
   const colorByCourse = new Map(
     [...option.items]
@@ -340,8 +493,8 @@ function Calendar({ option, type }: { option: ScheduleOption; type: ScheduleType
     <section className="calendar-card" aria-label="Horario semanal seleccionado">
       <div className="calendar-heading">
         <div>
-          <span className="eyebrow">OPCIÓN MÍNIMA REPRESENTATIVA</span>
-          <h2>Opción {TYPE_LABEL[type]}</h2>
+          <span className="eyebrow">{eyebrow}</span>
+          <h2>{title || `Opción ${TYPE_LABEL[type]}`}</h2>
         </div>
         <div className="schedule-tags">
           <span className="tag success">Sin traslapes</span>
@@ -405,10 +558,10 @@ function Calendar({ option, type }: { option: ScheduleOption; type: ScheduleType
 }
 
 export default function Home() {
-  const [mode, setMode] = useState<"viewer" | "simulator">("viewer");
   const [semester, setSemester] = useState(1);
   const [scheduleType, setScheduleType] = useState<ScheduleType>("Matutino");
   const [selectedConstraintNrc, setSelectedConstraintNrc] = useState("");
+  const [selectedRecommendationId, setSelectedRecommendationId] = useState("");
   const analyses = useMemo(
     () =>
       Array.from({ length: 9 }, (_, index) => {
@@ -428,83 +581,26 @@ export default function Home() {
     .find((item) => item.nrc === selectedConstraintNrc);
   const selectedConstraintSection = sections.find((item) => item.n === selectedConstraintNrc);
   const constraintOption = selectedConstraint ? analysis.sectionExamples[selectedConstraint.nrc] : undefined;
-
-  const [simSemester, setSimSemester] = useState(1);
-  const simPool = useMemo(() => sections.filter((section) => section.e === simSemester), [simSemester]);
-  const [selectedNrc, setSelectedNrc] = useState(sections.find((section) => section.e === 1 && section.m.length)?.n || "");
-  const selectedSection = simPool.find((section) => section.n === selectedNrc && section.m.length) || simPool.find((section) => section.m.length);
-  const [meetingIndex, setMeetingIndex] = useState(0);
-  const baseMeeting = selectedSection?.m[meetingIndex] || selectedSection?.m[0];
-  const [newDay, setNewDay] = useState(baseMeeting?.[0] || "L");
-  const [newStart, setNewStart] = useState(baseMeeting ? displayTime(baseMeeting[1]) : "08:00");
-  const [newEnd, setNewEnd] = useState(baseMeeting ? displayTime(baseMeeting[2]) : "09:55");
+  const semesterPool = useMemo(
+    () => sections.filter((section) => section.e === semester),
+    [semester],
+  );
+  const recommendations = useMemo(
+    () => buildSectionRecommendations(semesterPool, analysis),
+    [semesterPool, analysis],
+  );
+  const selectedRecommendation = recommendations
+    .flatMap((item) => item.suggestions)
+    .find((item) => item.id === selectedRecommendationId);
 
   function chooseSemester(value: number) {
     setSemester(value);
     setSelectedConstraintNrc("");
+    setSelectedRecommendationId("");
     const nextAnalysis = analyses[value - 1];
     const nextType = (["Matutino", "Vespertino", "Mixto"] as ScheduleType[]).find((type) => nextAnalysis.representatives[type]);
     if (nextType) setScheduleType(nextType);
   }
-
-  function updateSimSemester(value: number) {
-    const next = sections.find((section) => section.e === value && section.m.length);
-    setSimSemester(value);
-    setSelectedNrc(next?.n || "");
-    setMeetingIndex(0);
-    const meeting = next?.m[0];
-    if (meeting) {
-      setNewDay(meeting[0]);
-      setNewStart(displayTime(meeting[1]));
-      setNewEnd(displayTime(meeting[2]));
-    }
-  }
-
-  function updateSelectedSection(nrc: string) {
-    const next = simPool.find((section) => section.n === nrc);
-    setSelectedNrc(nrc);
-    setMeetingIndex(0);
-    const meeting = next?.m[0];
-    if (meeting) {
-      setNewDay(meeting[0]);
-      setNewStart(displayTime(meeting[1]));
-      setNewEnd(displayTime(meeting[2]));
-    }
-  }
-
-  function updateMeeting(index: number) {
-    const meeting = selectedSection?.m[index];
-    setMeetingIndex(index);
-    if (meeting) {
-      setNewDay(meeting[0]);
-      setNewStart(displayTime(meeting[1]));
-      setNewEnd(displayTime(meeting[2]));
-    }
-  }
-
-  const simulation = useMemo(() => {
-    const current = analyses[simSemester - 1].valid;
-    if (!selectedSection || !baseMeeting) return { current, proposed: current, conflicts: [] as Section[] };
-    const compactStart = newStart.replace(":", "");
-    const compactEnd = newEnd.replace(":", "");
-    if (min(compactStart) >= min(compactEnd)) return { current, proposed: current, conflicts: [] as Section[] };
-    const movedPool = simPool.map((section) => {
-      if (section.n !== selectedSection.n) return section;
-      return {
-        ...section,
-        m: section.m.map((meeting, index) =>
-          index === meetingIndex ? [newDay, compactStart, compactEnd, meeting[3]] as Meeting : meeting,
-        ),
-      };
-    });
-    const proposed = buildScheduleAnalysis(movedPool).valid;
-    const moved = movedPool.find((section) => section.n === selectedSection.n)!;
-    const conflicts = movedPool.filter(
-      (section) => section.k !== moved.k && section.m.length && meetingsConflict(moved.m, section.m),
-    );
-    return { current, proposed, conflicts };
-  }, [analyses, simSemester, simPool, selectedSection, baseMeeting, meetingIndex, newDay, newStart, newEnd]);
-  const delta = simulation.proposed - simulation.current;
 
   return (
     <main>
@@ -512,8 +608,7 @@ export default function Home() {
         <div className="brand-mark" aria-hidden="true">LQ</div>
         <div className="brand-copy"><strong>Licenciatura en Química</strong><span>Herramienta de planeación de horarios</span></div>
         <nav className="mode-switch" aria-label="Secciones principales">
-          <button className={mode === "viewer" ? "active" : ""} onClick={() => setMode("viewer")}>Visualizador</button>
-          <button className={mode === "simulator" ? "active" : ""} onClick={() => setMode("simulator")}>Simulador de cambios</button>
+          <Link className="active" href="/">Visualizador</Link>
           <Link href="/generador">Generador de horario</Link>
         </nav>
       </header>
@@ -522,8 +617,8 @@ export default function Home() {
         <section className="hero compact-hero">
           <div>
             <span className="eyebrow">OFERTA ACADÉMICA LQUI</span>
-            <h1>{mode === "viewer" ? "Opciones viables por semestre" : "Simulador de cambios"}</h1>
-            <p>{mode === "viewer" ? "Verifica las alternativas mínimas matutina, vespertina y mixta, y localiza materias o cruces que impiden integrar un horario completo." : "Mueve provisionalmente un bloque y mide cuántas opciones compatibles se ganan o se pierden."}</p>
+            <h1>Opciones viables por semestre</h1>
+            <p>Verifica las alternativas mínimas matutina, vespertina y mixta, localiza materias que impiden integrar un horario completo y consulta ajustes recomendados.</p>
           </div>
           <div className="config-card" aria-label="Configuración de la consulta">
             <span><small>Ciclo</small><strong>202620 · 2026-B</strong></span>
@@ -532,8 +627,6 @@ export default function Home() {
           </div>
         </section>
 
-        {mode === "viewer" ? (
-          <>
             <nav className="semester-tabs visual-tabs" aria-label="Elegir semestre">
               {analyses.map((item, index) => (
                 <button className={semester === index + 1 ? "active" : ""} key={index} onClick={() => chooseSemester(index + 1)}>
@@ -678,7 +771,7 @@ export default function Home() {
                 ) : (
                   <div className="zero-option-detail">
                     <strong>No existe un horario completo que incluya esta sección.</strong>
-                    <p>Su horario se traslapa con las alternativas necesarias para completar el semestre. Conviene revisar esta sección en el Simulador de cambios.</p>
+                    <p>Su horario se traslapa con las alternativas necesarias para completar el semestre. Consulta los ajustes hipotéticos recomendados al final de la página.</p>
                     {selectedConstraintSection?.m.length ? (
                       <div className="constraint-meetings">
                         {selectedConstraintSection.m.map((meeting, index) => (
@@ -692,30 +785,96 @@ export default function Home() {
                 )}
               </section>
             )}
-          </>
-        ) : (
-          <section className="simulator-layout">
-            <div className="sim-form panel">
-              <div className="section-heading compact-heading"><div><span className="eyebrow">ESCENARIO PROPUESTO</span><h2>Mover una sección</h2></div><span className="step-tag">No modifica SIIAU</span></div>
-              <label><span>Semestre</span><select value={simSemester} onChange={(event) => updateSimSemester(Number(event.target.value))}>{analyses.map((_, index) => <option key={index} value={index + 1}>{index + 1}º semestre</option>)}</select></label>
-              <label><span>Sección</span><select value={selectedSection?.n || ""} onChange={(event) => updateSelectedSection(event.target.value)}>{simPool.filter((section) => section.m.length).map((section) => <option key={section.n} value={section.n}>{section.c} · {section.s} · NRC {section.n}</option>)}</select></label>
-              {selectedSection && selectedSection.m.length > 1 && <label><span>Bloque a modificar</span><select value={meetingIndex} onChange={(event) => updateMeeting(Number(event.target.value))}>{selectedSection.m.map((meeting, index) => <option key={index} value={index}>{DAY_NAMES[meeting[0]]} {displayTime(meeting[1])}–{displayTime(meeting[2])}</option>)}</select></label>}
-              <div className="current-slot"><span>Horario actual</span><strong>{baseMeeting ? `${DAY_NAMES[baseMeeting[0]]} ${displayTime(baseMeeting[1])}–${displayTime(baseMeeting[2])}` : "Sin horario"}</strong><small>{baseMeeting?.[3]}</small></div>
-              <fieldset><legend>Nuevo horario provisional</legend><label><span>Día</span><select value={newDay} onChange={(event) => setNewDay(event.target.value)}>{DAYS.map((day) => <option key={day} value={day}>{DAY_NAMES[day]}</option>)}</select></label><div className="time-fields"><label><span>Inicio</span><input type="time" value={newStart} onChange={(event) => setNewStart(event.target.value)} /></label><label><span>Fin</span><input type="time" value={newEnd} onChange={(event) => setNewEnd(event.target.value)} /></label></div></fieldset>
-              <p className="fine-print">El cupo es informativo y no modifica el cálculo. Solo se consideran secciones del centro D con horario capturado.</p>
+
+          <section className="recommendation-panel panel" id="recomendaciones-ajuste">
+            <div className="section-heading recommendation-heading">
+              <div>
+                <span className="eyebrow">RECOMENDADOR DE CAMBIOS</span>
+                <h2>Ajustes que podrían ampliar la compatibilidad</h2>
+              </div>
+              <span className="hypothetical-badge">Escenario hipotético</span>
             </div>
-            <div className="sim-results">
-              <article className="comparison-card panel">
-                <div className="section-heading compact-heading"><div><span className="eyebrow">IMPACTO INMEDIATO</span><h2>Actual vs. simulado</h2></div><span className={`impact-badge ${delta < 0 ? "negative" : delta > 0 ? "positive" : "neutral"}`}>{delta > 0 ? "Cambio favorable" : delta < 0 ? "Cambio desfavorable" : "Cambio neutral"}</span></div>
-                <div className="comparison-numbers"><div><span>Actual</span><strong>{simulation.current.toLocaleString("es-MX")}</strong><small>combinaciones sin cruce</small></div><div className="arrow">→</div><div><span>Simulado</span><strong>{simulation.proposed.toLocaleString("es-MX")}</strong><small>combinaciones sin cruce</small></div><div className={`delta ${delta < 0 ? "negative" : delta > 0 ? "positive" : ""}`}><span>Diferencia</span><strong>{delta > 0 ? "+" : ""}{delta.toLocaleString("es-MX")}</strong><small>opciones</small></div></div>
-              </article>
-              <article className="affected-card panel">
-                <div className="section-heading compact-heading"><div><span className="eyebrow">CRUCES DIRECTOS</span><h2>Secciones que coinciden con el cambio</h2></div><strong>{simulation.conflicts.length}</strong></div>
-                {simulation.conflicts.length ? <div className="conflict-list">{simulation.conflicts.slice(0, 8).map((section) => <div key={section.n}><span>{section.c}</span><strong>{section.s} · NRC {section.n}</strong><small>{section.m.map((meeting) => `${DAY_NAMES[meeting[0]].slice(0, 3)} ${displayTime(meeting[1])}–${displayTime(meeting[2])}`).join(" · ")}</small></div>)}</div> : <div className="empty-state"><strong>Sin cruces directos</strong><p>El bloque propuesto no coincide con otras secciones del mismo semestre.</p></div>}
-              </article>
+            <div className="recommendation-disclaimer">
+              <strong>Estas propuestas no representan la oferta actual ni modifican SIIAU.</strong>
+              <p>Son recomendaciones automáticas de planeación. Conservan la duración de cada bloque y buscan posiciones que permitan integrar la sección en uno o más horarios completos.</p>
             </div>
+
+            {recommendations.length ? (
+              <div className="recommendation-list">
+                {recommendations.map(({ section, suggestions }) => (
+                  <article className="recommendation-course" key={section.n}>
+                    <div className="recommendation-course-head">
+                      <div>
+                        <span>Materia sin horario completo compatible</span>
+                        <h3>{section.c}</h3>
+                        <small>Sección {section.s} · NRC {section.n} · {section.p}</small>
+                      </div>
+                      <strong>{suggestions.length ? `${suggestions.length} propuestas` : "Sin ajuste simple"}</strong>
+                    </div>
+                    <div className="current-meetings">
+                      <span>Horario actual</span>
+                      {section.m.map((meeting, index) => (
+                        <small key={`${section.n}-current-${index}`}>
+                          {DAY_NAMES[meeting[0]]} {displayTime(meeting[1])}–{displayTime(meeting[2])}
+                        </small>
+                      ))}
+                    </div>
+
+                    {suggestions.length ? (
+                      <div className="suggestion-grid">
+                        {suggestions.map((suggestion, index) => (
+                          <article className={selectedRecommendationId === suggestion.id ? "suggestion-card selected" : "suggestion-card"} key={suggestion.id}>
+                            <div className="suggestion-rank">
+                              <span>Recomendación {index + 1}</span>
+                              <strong>+{suggestion.newCombinations.toLocaleString("es-MX")}</strong>
+                              <small>nuevas combinaciones</small>
+                            </div>
+                            <strong>{suggestion.kind === "section" ? "Reubicar la sección completa" : "Mover un bloque"}</strong>
+                            <div className="change-list">
+                              {suggestion.changes.map(({ from, to }, changeIndex) => (
+                                <div key={`${suggestion.id}-change-${changeIndex}`}>
+                                  <span>{DAY_NAMES[from[0]]} {displayTime(from[1])}–{displayTime(from[2])}</span>
+                                  <b aria-hidden="true">→</b>
+                                  <strong>{DAY_NAMES[to[0]]} {displayTime(to[1])}–{displayTime(to[2])}</strong>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="suggestion-total">
+                              Total estimado del semestre: <strong>{suggestion.resultingTotal.toLocaleString("es-MX")}</strong>
+                            </div>
+                            <button type="button" onClick={() => setSelectedRecommendationId(suggestion.id)}>
+                              {selectedRecommendationId === suggestion.id ? "Horario mostrado" : "Ver horario resultante"}
+                            </button>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="no-simple-suggestion">
+                        No se encontró una alternativa viable modificando un solo bloque o desplazando uniformemente toda la sección. Este caso requiere revisión manual conjunta con otras materias.
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="all-clear recommendation-clear">
+                <strong>No se requieren recomendaciones para este semestre</strong>
+                <p>Todas las secciones con horario capturado participan en al menos una combinación completa.</p>
+              </div>
+            )}
+
+            {selectedRecommendation && (
+              <div className="recommended-calendar">
+                <Calendar
+                  option={selectedRecommendation.example}
+                  type={scheduleMetrics(selectedRecommendation.example).shift}
+                  eyebrow="VISUALIZACIÓN DE LA RECOMENDACIÓN"
+                  title={`${selectedRecommendation.section.c} · ${selectedRecommendation.section.s}`}
+                />
+                <p>Esta visualización corresponde únicamente al escenario recomendado seleccionado. No representa el horario publicado en SIIAU.</p>
+              </div>
+            )}
           </section>
-        )}
       </div>
       <footer>Datos de consulta SIIAU 202620 · Centro D · LQUI · Cupo únicamente informativo</footer>
     </main>

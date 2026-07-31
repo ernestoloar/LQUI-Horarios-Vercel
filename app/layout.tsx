@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Visualizador y simulador de horarios LQUI",
+  title: "Visualizador y recomendador de horarios LQUI",
   description:
-    "Consulta y simulación de cambios en la oferta académica LQUI del ciclo 202620 en CUCEI.",
+    "Consulta de compatibilidad y recomendaciones de ajuste para la oferta académica LQUI del ciclo 202620 en CUCEI.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
